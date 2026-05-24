@@ -1,0 +1,9 @@
+2026-05-23 22:26:42,072 INFO    MainThread:12500 [wandb_setup.py:_flush():81] Current SDK version is 0.26.1
+2026-05-23 22:26:42,072 INFO    MainThread:12500 [wandb_setup.py:_flush():81] Configure stats pid to 12500
+2026-05-23 22:26:42,072 INFO    MainThread:12500 [wandb_setup.py:_flush():81] Loading settings from environment variables
+2026-05-23 22:26:42,072 INFO    MainThread:12500 [wandb_init.py:setup_run_log_directory():723] Logging user logs to /Users/sebastin/Documents/perso/ARENA_training/distributed_training/wandb/run-20260523_222642-a3ucmy4z/logs/debug.log
+2026-05-23 22:26:42,072 INFO    MainThread:12500 [wandb_init.py:setup_run_log_directory():724] Logging internal logs to /Users/sebastin/Documents/perso/ARENA_training/distributed_training/wandb/run-20260523_222642-a3ucmy4z/logs/debug-internal.log
+2026-05-23 22:26:42,073 INFO    MainThread:12500 [wandb_init.py:init():850] calling init triggers
+2026-05-23 22:26:42,073 INFO    MainThread:12500 [wandb_init.py:init():855] wandb.init called with sweep_config: {}
+config: {'n_classes': 10, 'batch_size': 128, 'epochs': 3, 'learning_rate': 0.001, 'weight_decay': 0.0, 'wandb_project': 'day3-resnet-dist-training', 'wandb_name': None, 'world_size': 4, '_wandb': {}}
+2026-05-23 22:26:42,073 INFO    MainThread:12500 [wandb_init.py:init():898] starting backend

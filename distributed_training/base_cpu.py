@@ -1,0 +1,83 @@
+# Distributed training basics
+
+import os
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Iterable, Literal
+
+import einops
+import numpy as np
+import torch as t
+import torch.distributed as dist
+import torch.multiprocessing as mp
+import torch.nn.functional as F
+import wandb
+import itertools
+from IPython.core.display import HTML
+from IPython.display import display
+from pathlib import Path
+from jaxtyping import Float, Int
+from torch import Tensor, optim
+from torch.utils.data import DataLoader, DistributedSampler
+from torchvision import datasets, transforms
+from tqdm import tqdm
+
+# -----------------   SETUP  -------------------------
+
+# Make sure exercises are in the path
+chapter = "chapter0_fundamentals"
+section = "part3_optimization"
+#root_dir = next(p for p in Path.cwd().parents if (p / chapter).exists())
+root_dir = Path("/Users/sebastin/Documents/perso/ARENA_training/ARENA_3.0")
+exercises_dir = root_dir / chapter / "exercises"
+section_dir = exercises_dir / section
+if str(exercises_dir) not in sys.path:
+    sys.path.append(str(exercises_dir))
+
+MAIN = __name__ == "__main__"
+
+import part3_optimization.tests as tests
+from part2_cnns.solutions import Linear, ResNet34, get_resnet_for_feature_extraction
+from part3_optimization.utils import plot_fn, plot_fn_with_points
+from plotly_utils import bar, imshow, line
+
+device = t.device("mps" if t.backends.mps.is_available() else "cuda" if t.cuda.is_available() else "cpu")
+
+# ------------------------------------------------------------------
+
+WORLD_SIZE = min(t.cuda.device_count(), 3)
+
+os.environ["MASTER_ADDR"] = "localhost"
+os.environ["MASTER_PORT"] = "12345"
+
+
+def send_receive_nccl(rank, world_size):
+    dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
+
+    device = t.device(f"cpu:{rank}")
+
+    if rank == 0:
+        # Create a tensor, send it to rank 1
+        sending_tensor = t.tensor([rank], device=device)
+        print(f"{rank=}, {device=}, sending {sending_tensor=}")
+        dist.send(sending_tensor, dst=1)  # Send tensor to CPU before sending
+    elif rank == 1:
+        # Receive tensor from rank 0 (it needs to be on the CPU before receiving)
+        received_tensor = t.tensor([rank], device=device)
+        print(f"{rank=}, {device=}, creating {received_tensor=}")
+        dist.recv(received_tensor, src=0)  # this line overwrites the tensor's data with our `sending_tensor`
+        print(f"{rank=}, {device=}, received {received_tensor=}")
+
+    dist.destroy_process_group()
+
+
+if MAIN:
+    world_size = 2  # simulate 2 processes
+    mp.spawn(
+        send_receive_nccl,
+        args=(world_size,),
+        nprocs=world_size,
+        join=True,
+    )
