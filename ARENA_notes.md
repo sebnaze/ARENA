@@ -41,13 +41,13 @@ i.e. "difference in entropy" between $P$ and $Q$.
 
 It can be re-written in terms of cross entropy $H(p,q) = H(p) + D_{\text{KL}}(p||q)$ where $H(p)$ is the entropy of $P \quad  \longrightarrow \quad D_{\text{KL}}(p||q) = H(p,q) - H(p)$. 
 
-Standard cross-entropy equation is $H(p,q) = -p \log q$.
+Standard cross-entropy equation is $H(p,q) = - \sum p \log q$.
 
 - Suppose $P$ is the probability distribution of which word comes next in natural language, and $Q$ is a language model's estimated probability distribution. What will the cross entropy $H(P,Q)$ be if the model is guessing words uniformly? What will the cross entropy be if the model can predict words with the exact right frequency?
 
-&emsp; If model is guessing uniformly, then $H(p,q) = -p \log q = -p \log \frac{1}{|V|} = \log |V|$ where V is the vocab set, i.e. $|V|$ is the size of the vocab.  
+&emsp; If model is guessing uniformly, then $H(p,q) = - \sum p \log q = - \sum p \log \frac{1}{|V|} = \log |V| \sum p = \log |V|$ where V is the vocab set, i.e. $|V|$ is the size of the vocab.  
 
-&emsp; If the model is guessing similarly as $P$, $H(p,q) = -p \log q = -p \log p = H(P)$.
+&emsp; If the model is guessing similarly as $P$, $H(p,q) = -\sum p \log q = - \sum p \log p = H(P)$.
 
 
 ### Programming
@@ -153,3 +153,54 @@ $\beta_2$ is the decay rates of the second moment (the variance), typically set 
 
 Collective communication: `broadcast`, `gather` (all to one, concatenated), `reduce` (like gather, with operation -- sum, mean, etc.).  
 `all_gather` and `all_reduce` ensure all processes get the data. 
+
+
+## Back-prop
+
+![Backprop diagram](./imgs/abc_de_L.png)
+
+`a`, `b` and `c` are leaf node, `L` is the root node. `d` and `e` are parents node of `L`. 
+
+Why is it important to store the parent node in a tensor? So that we can compute the gradient for that path (i.e. allowing gradient propagation).
+Gradients are accumulated rather than overwritten, so that in a case like `b`, since addition is commutative it does mot matter whether backwards is executed on Add or Mul first. 
+
+Chain rule:
+$$ \frac{dL}{dx} = \frac{dL}{d(out)} \times \frac{d(out)}{dx} = \frac{dL}{d(out)} \times \frac{d(log(x) )}{dx} = \frac{dL}{d(out)} \times \frac{1}{x} $$
+
+### Cross entropy loss revisited
+ Let's redo step by step how to get the loss from the logits and true labels.
+
+ Full Cross Entropy Loss Equations:
+ $$ L = -\sum y_{true} \, \text{log}(y_{pred}) $$
+
+ Since $y_{true}$ is vector of $[0 ... 1 ... 0]$ for each sample, the above simplifies as
+ $$ L = -\text{log} (y_{pred}) $$
+ i.e. the predicted log probability.
+
+ Because $y_{pred} = \text{softmax}(logits)$ we have:
+ $$ L = -\text{log}(\frac{e^{logits}}{\sum e^{logits}}) = - \Big( \text{log}(e^{logits}) - \text{log}\Big(\sum e^{logits} \Big) \Big) = - logits + \text{log}\Big(\sum e^{logits} \Big)$$
+
+
+## Autoencoder (AE) and Variational AE
+
+### AE
+
+![Autoencoder I](./imgs/ae-diagram-l.png)
+
+![Autoencoder II](./imgs/ae-help-10.png)
+
+### VAE
+
+![VAE](./imgs/vae-reparam-l.png)
+
+Explain in your own words why you need the reparameterization trick in order to train the VAE. 
+$$ z = \mu + \sigma \odot \epsilon $$
+The reparameterization trick (encoding the input into a mean $\mu$ and a standard dev $\sigma$ multiplied by a random vector $\epsilon$) forces the latent to have a more continuous representation across classes (how? by enforcing $\sigma \approx 1$ instead of a single point at $\mu_{\text{class}}$). This forces exploration of the latent space via the KL-divergence:  
+
+$$ \text{Loss}_{KL} = \frac{1}{2} \sum \mu^2 + \sigma^2 - \ln(\sigma^2) -1 $$
+
+i.e. if the encoder minimizes $\sigma \rightarrow 0$ , the term $-\ln(\sigma^2)$ goes to $+\infty$. 
+
+Also the term $\mu^2$ forces the encoded center of all the classes to be around 0 (i.e. overlappign). The decoder has to figure out a way to transition smoothly from one class to another, creating a truly continuous space.   
+ 
+The $\epsilon$ parameter is random and is necessary for backprop (how? why?). Because differentiating $\mathcal{N}(\mu,\sigma)$ is not possible (non-continuous), but differentiating $\mu + \sigma \odot \epsilon$ works ($\frac{dz}{d\mu}=1$ and $\frac{dz}{d\sigma} = \epsilon$). 
