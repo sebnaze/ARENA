@@ -14,6 +14,7 @@ from tqdm import tqdm
 from torchvision import datasets, transforms, models
 from torch.utils.data import DataLoader, Subset
 from dataclasses import dataclass
+import platform
 from jaxtyping import Float, Int
 import torchinfo
 from PIL import Image
@@ -28,7 +29,7 @@ rprint = console.print
 chapter = "chapter0_fundamentals"
 section = "part2_cnns"
 #root_dir = next(p for p in Path.cwd().parents if (p / chapter).exists())
-root_dir = Path("/Users/sebastin/Documents/perso/ARENA_training/ARENA_3.0")
+root_dir = Path("/Users/sebastin/Documents/perso/ARENA_training/ARENA_3.0") if "QIMR" in platform.node() else Path("/home/sebastin/Documents/ARENA/ARENA_3.0")
 exercises_dir = root_dir / chapter / "exercises"
 section_dir = exercises_dir / section
 if str(exercises_dir) not in sys.path:

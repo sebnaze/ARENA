@@ -3,6 +3,7 @@ import os
 import re
 import sys
 import time
+import platform
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
@@ -19,7 +20,7 @@ grad_tracking_enabled = True
 chapter = "chapter0_fundamentals"
 section = "part4_backprop"
 #root_dir = next(p for p in Path.cwd().parents if (p / chapter).exists())
-root_dir = Path("/Users/sebastin/Documents/perso/ARENA_training/ARENA_3.0")
+root_dir = Path("/Users/sebastin/Documents/perso/ARENA_training/ARENA_3.0") if "QIMR" in platform.node() else Path("/home/sebastin/Documents/ARENA/ARENA_3.0")
 exercises_dir = root_dir / chapter / "exercises"
 section_dir = exercises_dir / section
 if str(exercises_dir) not in sys.path:

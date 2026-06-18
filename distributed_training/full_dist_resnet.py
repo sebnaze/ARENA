@@ -30,7 +30,7 @@ from tqdm import tqdm
 chapter = "chapter0_fundamentals"
 section = "part3_optimization"
 #root_dir = next(p for p in Path.cwd().parents if (p / chapter).exists())
-root_dir = Path("/Users/sebastin/Documents/perso/ARENA_training/ARENA_3.0")
+root_dir = Path("/home/sebastin/Documents/ARENA/ARENA_3.0")
 exercises_dir = root_dir / chapter / "exercises"
 section_dir = exercises_dir / section
 if str(exercises_dir) not in sys.path:
@@ -256,19 +256,22 @@ class DistResNetTrainer:
 
         loss = F.cross_entropy(logits, labels)
         loss.backward()
-        
+
         if self.rank == 0:
             t2 = time.perf_counter()
             print(f"Backward pass time: {t2-t1:.4f} seconds")
             wandb.log({"bwd_time": t2-t1}, step=self.examples_seen)
 
-        all_reduce(loss.grad, self.rank, self.args.world_size, op="mean")  # Average gradients across ranks
+        for param in self.model.parameters():
+            if param.grad is not None:
+                all_reduce(param.grad, self.rank, self.args.world_size, op="mean")
 
         if self.rank == 0:
             t3 = time.perf_counter()
             print(f"Gradient synchronization time: {t3-t2:.4f} seconds")
             wandb.log({"grad_sync_time": t3-t2}, step=self.examples_seen)
         
+        t.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0) # <-- suggested by claude
         self.optimizer.step()
         self.optimizer.zero_grad()
         
@@ -341,6 +344,15 @@ class DistResNetTrainer:
 def dist_train_resnet_from_scratch(rank, world_size):
     #dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
     dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
+
+    total_cores = int(np.floor(os.cpu_count() * 0.8)) # <- use 80% of available CPU cores to avoid overloading 
+    world_size = dist.get_world_size()
+    threads_per_process = max(1, total_cores // world_size)
+    
+    # 2. Force PyTorch to limit its internal thread pool
+    t.set_num_threads(threads_per_process)
+    t.set_num_interop_threads(threads_per_process)
+
     args = DistResNetTrainingArgs(world_size=world_size)
     trainer = DistResNetTrainer(args, rank)
     trainer.train()
@@ -348,7 +360,7 @@ def dist_train_resnet_from_scratch(rank, world_size):
 
 
 if MAIN:
-    world_size = 4#t.cuda.device_count()
+    world_size = 8#t.cuda.device_count()
     mp.spawn(
         dist_train_resnet_from_scratch,
         args=(world_size,),

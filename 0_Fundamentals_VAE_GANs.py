@@ -12,6 +12,7 @@ import wandb
 from datasets import load_dataset
 from einops.layers.torch import Rearrange
 from jaxtyping import Float
+import platform
 from torch import Tensor, nn
 from torch.utils.data import DataLoader, Dataset, Subset
 from torchvision import datasets, transforms
@@ -21,7 +22,7 @@ from tqdm import tqdm
 chapter = "chapter0_fundamentals"
 section = "part5_vaes_and_gans"
 #root_dir = next(p for p in Path.cwd().parents if (p / chapter).exists())
-root_dir = Path("/Users/sebastin/Documents/perso/ARENA_training/ARENA_3.0")
+root_dir = Path("/Users/sebastin/Documents/perso/ARENA_training/ARENA_3.0") if "QIMR" in platform.node() else Path("/home/sebastin/Documents/ARENA/ARENA_3.0") 
 exercises_dir = root_dir / chapter / "exercises"
 section_dir = exercises_dir / section
 if str(exercises_dir) not in sys.path:
@@ -31,6 +32,8 @@ MAIN = __name__ == "__main__"
 
 import part5_vaes_and_gans.tests as tests
 import part5_vaes_and_gans.utils as utils
+from part2_cnns.solutions import BatchNorm2d, Conv2d, Linear, ReLU, Sequential
+from part5_vaes_and_gans.solutions import ConvTranspose2d
 from plotly_utils import imshow
 
 device = t.device("mps" if t.backends.mps.is_available() else "cuda" if t.cuda.is_available() else "cpu")
@@ -189,7 +192,7 @@ class AutoencoderArgs:
     wandb_project: str | None = "day5-autoencoder"
     wandb_name: str | None = None
     log_every_n_steps: int = 250
-
+# %%
 
 class AutoencoderTrainer:
     def __init__(self, args: AutoencoderArgs):
@@ -274,7 +277,7 @@ def create_grid_of_latents(
     grid_latent[..., dims[1]] = x  # cols vary over dim=1
     return grid_latent.flatten(0, 1)  # flatten over (rows, cols) into a single batch dimension
 
-
+# %%
 grid_latent = create_grid_of_latents(autoencoder, interpolation_range=(-3, 3))
 
 # Map grid latent through the decoder
@@ -361,7 +364,7 @@ class VAETrainer:
     def __init__(self, args: VAEArgs):
         self.args = args
         self.trainset = get_dataset(args.dataset)
-        self.trainloader = DataLoader(self.trainset, batch_size=args.batch_size, shuffle=True)#, num_workers=8)
+        self.trainloader = DataLoader(self.trainset, batch_size=args.batch_size, shuffle=True, num_workers=8)
         self.model = VAE(
             latent_dim_size=args.latent_dim_size,
             hidden_dim_size=args.hidden_dim_size,
@@ -426,8 +429,397 @@ class VAETrainer:
         return self.model
 
 
-args = VAEArgs(latent_dim_size=5, hidden_dim_size=100, use_wandb=False)
+args = VAEArgs(latent_dim_size=5, hidden_dim_size=100, use_wandb=True)
 trainer = VAETrainer(args)
 vae = trainer.train()
+
+# %% show grid
+grid_latent = create_grid_of_latents(vae, interpolation_range=(-1, 1))
+output = vae.decoder(grid_latent)
+utils.visualise_output(output, grid_latent, title="VAE latent space visualization")
+
+
+# %% show latent space
+small_dataset = Subset(get_dataset("MNIST"), indices=range(0, 5000))
+imgs = t.stack([img for img, label in small_dataset]).to(device)
+labels = t.tensor([label for img, label in small_dataset]).to(device).int()
+
+# We're getting the mean vector, which is the [0]-indexed output of the encoder
+latent_vectors = vae.encoder(imgs)[0, :, :2]
+holdout_latent_vectors = vae.encoder(HOLDOUT_DATA)[0, :, :2]
+
+utils.visualise_input(latent_vectors.to('cpu'), labels.to('cpu'), holdout_latent_vectors.to('cpu'), HOLDOUT_DATA)
+
+# %% ----------------------------------------------------------------
+#                           GANS
+# -------------------------------------------------------------------   
+
+class Tanh(nn.Module):
+    def forward(self, x: Tensor) -> Tensor:
+        return (t.exp(2*x) - 1) / (t.exp(2*x) + 1)
+
+
+class LeakyReLU(nn.Module):
+    def __init__(self, negative_slope: float = 0.01):
+        super().__init__()
+        self.negative_slope = negative_slope
+
+    def forward(self, x: Tensor) -> Tensor:
+        return t.where(x >= 0, x, self.negative_slope * x)
+
+    def extra_repr(self) -> str:
+        return f"negative_slope={self.negative_slope}"
+
+
+class Sigmoid(nn.Module):
+    def forward(self, x: Tensor) -> Tensor:
+        return 1 / (1 + t.exp(-x))
+
+
+tests.test_Tanh(Tanh)
+tests.test_LeakyReLU(LeakyReLU)
+tests.test_Sigmoid(Sigmoid)
+
+
+# %%
+class Generator(nn.Module):
+    def __init__(
+        self,
+        latent_dim_size: int = 100,
+        img_size: int = 64,
+        img_channels: int = 3,
+        hidden_channels: list[int] = [128, 256, 512],
+    ):
+        """
+        Implements the generator architecture from the DCGAN paper (the diagram at the top
+        of page 4). We assume the size of the activations doubles at each layer (so image
+        size has to be divisible by 2 ** len(hidden_channels)).
+
+        Args:
+            latent_dim_size:
+                the size of the latent dimension, i.e. the input to the generator
+            img_size:
+                the size of the image, i.e. the output of the generator
+            img_channels:
+                the number of channels in the image (3 for RGB, 1 for grayscale)
+            hidden_channels:
+                the number of channels in the hidden layers of the generator (starting closest
+                to the middle of the DCGAN and going outward, i.e. in chronological order for
+                the generator)
+        """
+        n_layers = len(hidden_channels)
+        assert img_size % (2**n_layers) == 0, "activation size must double at each layer"
+
+        super().__init__()
+
+        self.project_and_reshape = Sequential(
+            Linear(in_features=latent_dim_size, out_features=hidden_channels[-1]*(img_size//(2**n_layers))**2, bias=False),
+            Rearrange('b (c h w) -> b c h w', c=hidden_channels[-1], h=img_size//(2**n_layers), w=img_size//(2**n_layers)),
+            BatchNorm2d(num_features=hidden_channels[-1]),
+        )
+        self.hidden_layers = nn.Sequential(
+            *[nn.Sequential(
+                ConvTranspose2d(
+                    in_channels=hidden_channels[-i-1],
+                    out_channels=hidden_channels[-i-2],
+                    kernel_size=4,
+                    stride=2,
+                    padding=1
+                ),
+                BatchNorm2d(num_features=hidden_channels[-i-2]),
+                ReLU()
+            ) for i in range(n_layers-1)],
+            ConvTranspose2d(
+                in_channels=hidden_channels[0],
+                out_channels=img_channels,
+                kernel_size=4,
+                stride=2,
+                padding=1
+            ),
+            Tanh()
+        )   
+
+    def forward(self, x: Tensor) -> Tensor:
+        x = self.project_and_reshape(x)
+        x = self.hidden_layers(x)
+        return x
+
+
+class Discriminator(nn.Module):
+    def __init__(
+        self,
+        img_size: int = 64,
+        img_channels: int = 3,
+        hidden_channels: list[int] = [128, 256, 512],
+    ):
+        """
+        Implements the discriminator architecture from the DCGAN paper (the mirror image of
+        the diagram at the top of page 4). We assume the size of the activations doubles at
+        each layer (so image size has to be divisible by 2 ** len(hidden_channels)).
+
+        Args:
+            img_size:
+                the size of the image, i.e. the input of the discriminator
+            img_channels:
+                the number of channels in the image (3 for RGB, 1 for grayscale)
+            hidden_channels:
+                the number of channels in the hidden layers of the discriminator (starting
+                closest to the middle of the DCGAN and going outward, i.e. in reverse-
+                chronological order for the discriminator)
+        """
+        n_layers = len(hidden_channels)
+        assert img_size % (2**n_layers) == 0, "activation size must double at each layer"
+
+        super().__init__()
+
+        self.hidden_layers = Sequential(
+            *[nn.Sequential(
+                Conv2d(
+                    in_channels=img_channels,
+                    out_channels=hidden_channels[0],
+                    kernel_size=4,
+                    stride=2,
+                    padding=1
+                ),
+                LeakyReLU(negative_slope=0.2),
+            ),
+            *[nn.Sequential(
+                Conv2d(
+                    in_channels=hidden_channels[i],
+                    out_channels=hidden_channels[i+1],
+                    kernel_size=4,
+                    stride=2,
+                    padding=1
+                ),
+                BatchNorm2d(num_features=hidden_channels[i+1]),
+                LeakyReLU(negative_slope=0.2)
+            ) for i in range(n_layers-1)]
+            ]
+        )   
+        
+        self.classifier = Sequential(
+            nn.Flatten(start_dim=1, end_dim=-1),
+            Linear(in_features=hidden_channels[-1]*(img_size//(2**n_layers))**2, out_features=1, bias=False),
+            Sigmoid()
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        x = self.hidden_layers(x)
+        x = self.classifier(x)
+        return x.squeeze()  # remove dummy `out_channels` dimension
+
+
+class DCGAN(nn.Module):
+    netD: Discriminator
+    netG: Generator
+
+    def __init__(
+        self,
+        latent_dim_size: int = 100,
+        img_size: int = 64,
+        img_channels: int = 3,
+        hidden_channels: list[int] = [128, 256, 512],
+    ):
+        super().__init__()
+        self.latent_dim_size = latent_dim_size
+        self.img_size = img_size
+        self.img_channels = img_channels
+        self.hidden_channels = hidden_channels
+        self.netD = Discriminator(img_size, img_channels, hidden_channels)
+        self.netG = Generator(latent_dim_size, img_size, img_channels, hidden_channels)
+
+
+# %% Check that the number of parameters in your implementation matches the reference implementation
+from part2_cnns.utils import print_param_count
+from part5_vaes_and_gans import solutions
+
+print_param_count(Generator(), solutions.DCGAN().netG)
+print_param_count(Discriminator(), solutions.DCGAN().netD)
+
+# %% Check that the shapes of the activations in your implementation match the reference implementation
+model = DCGAN().to(device)
+x = t.randn(3, 100).to(device)
+print(torchinfo.summary(model.netG, input_data=x), end="\n\n")
+print(torchinfo.summary(model.netD, input_data=model.netG(x)))
+
+
+# %% Initialize weights as N(0, 0.02), and bias as N(1, 0,02) as per the DCGAN paper (the diagram at the top of page 4). 
+# Note that this should be done for all layers in both the generator and discriminator, 
+# except for the output layer of the discriminator (the one with sigmoid activation), where weights and bias should be initialized to 0.  
+def initialize_weights(model: nn.Module) -> None:
+    """
+    Initializes weights according to the DCGAN paper (details at the end of page 3 of the DCGAN
+    paper), by modifying the weights of the model in place.
+    """
+    for m in model.modules():
+        if isinstance(m, (Conv2d, ConvTranspose2d, Linear)):
+            t.nn.init.normal_(m.weight.data, mean=0.0, std=0.02)
+        elif isinstance(m, BatchNorm2d):
+            t.nn.init.normal_(m.weight.data, mean=1.0, std=0.02)
+            t.nn.init.zeros_(m.bias.data)
+
+
+tests.test_initialize_weights(initialize_weights, ConvTranspose2d, Conv2d, Linear, BatchNorm2d)
+
+# %% Check that the shapes of the activations in your implementation still match the reference implementation after weight initialization
+model = DCGAN().to(device)
+x = t.randn(3, 100).to(device)
+print(torchinfo.summary(model.netG, input_data=x), end="\n\n")
+print(torchinfo.summary(model.netD, input_data=model.netG(x)))
+
+# %% Training the GAN
+@dataclass
+class DCGANArgs:
+    """
+    Class for the arguments to the DCGAN (training and architecture).
+    Note, we use field(defaultfactory(...)) when our default value is a mutable object.
+    """
+
+    # architecture
+    latent_dim_size: int = 100
+    hidden_channels: list[int] = field(default_factory=lambda: [128, 256, 512])
+
+    # data & training
+    dataset: Literal["MNIST", "CELEB"] = "CELEB"
+    batch_size: int = 64
+    epochs: int = 3
+    lr: float = 0.0002
+    betas: tuple[float, float] = (0.5, 0.999)
+    clip_grad_norm: float | None = 1.0
+
+    # logging
+    use_wandb: bool = False
+    wandb_project: str | None = "day5-gan"
+    wandb_name: str | None = None
+    log_every_n_steps: int = 250
+
+
+class DCGANTrainer:
+    def __init__(self, args: DCGANArgs):
+        self.args = args
+        self.trainset = get_dataset(self.args.dataset)
+        self.trainloader = DataLoader(self.trainset, batch_size=args.batch_size, shuffle=True, num_workers=8)
+
+        batch, img_channels, img_height, img_width = next(iter(self.trainloader))[0].shape
+        assert img_height == img_width
+
+        self.model = DCGAN(args.latent_dim_size, img_height, img_channels, args.hidden_channels).to(device).train()
+        self.optG = t.optim.Adam(self.model.netG.parameters(), lr=args.lr, betas=args.betas)
+        self.optD = t.optim.Adam(self.model.netD.parameters(), lr=args.lr, betas=args.betas)
+
+    def training_step_discriminator(
+        self,
+        img_real: Float[Tensor, "batch channels height width"],
+        img_fake: Float[Tensor, "batch channels height width"],
+    ) -> Float[Tensor, ""]:
+        """
+        Generates a real and fake image, and performs a gradient step on the discriminator to
+        maximize log(D(x)) + log(1-D(G(z))). Logs to wandb if enabled.
+        """
+        disc_real = self.model.netD(img_real)
+        disc_fake = self.model.netD(img_fake.detach())  # detach to avoid backprop to generator
+        loss = -t.log(disc_real).mean() - t.log(1 - disc_fake).mean()
+        loss.backward()
+        if self.args.clip_grad_norm is not None:
+            t.nn.utils.clip_grad_norm_(self.model.netD.parameters(), self.args.clip_grad_norm)
+        self.optD.step()
+        self.optD.zero_grad()
+        if self.args.use_wandb:
+            if self.step % self.args.log_every_n_steps == 0:
+                wandb.log({"disc_loss": loss.item()}, step=self.step)
+        return loss
+
+    def training_step_generator(self, img_fake: Float[Tensor, "batch channels height width"]) -> Float[Tensor, ""]:
+        """
+        Performs a gradient step on the generator to maximize log(D(G(z))). Logs to wandb if enabled.
+        """
+        disc_fake = self.model.netD(img_fake)
+        loss = -t.log(disc_fake).mean()
+        loss.backward()
+        if self.args.clip_grad_norm is not None:
+            t.nn.utils.clip_grad_norm_(self.model.netG.parameters(), self.args.clip_grad_norm)
+        self.optG.step()
+        self.optG.zero_grad()
+        if self.args.use_wandb:
+            if self.step % self.args.log_every_n_steps == 0:
+                wandb.log({"gen_loss": loss.item()}, step=self.step)
+        return loss
+
+    @t.inference_mode()
+    def log_samples(self) -> None:
+        """
+        Performs evaluation by generating 8 instances of random noise and passing them through the
+        generator, then optionally logging the results to Weights & Biases.
+        """
+        assert self.step > 0, "First call should come after a training step. Remember to increment `self.step`."
+        self.model.netG.eval()
+
+        # Generate random noise
+        t.manual_seed(42)
+        noise = t.randn(10, self.model.latent_dim_size).to(device)
+        # Get generator output
+        output = self.model.netG(noise)
+        # Clip values to make the visualization clearer
+        output = output.clamp(output.quantile(0.01), output.quantile(0.99))
+        # Log to weights and biases
+        if self.args.use_wandb:
+            output = einops.rearrange(output, "b c h w -> b h w c").cpu().numpy()
+            wandb.log({"images": [wandb.Image(arr) for arr in output]}, step=self.step)
+        else:
+            display_data(output, nrows=1, title="Generator-produced images")
+
+        self.model.netG.train()
+
+    def train(self) -> DCGAN:
+        """Performs a full training run."""
+        self.step = 0
+        if self.args.use_wandb:
+            wandb.init(project=self.args.wandb_project, name=self.args.wandb_name)
+
+        for epoch in range(self.args.epochs):
+            progress_bar = tqdm(self.trainloader, total=len(self.trainloader), ascii=True, 
+                                desc=f"Epoch {epoch}/{self.args.epochs} - Training - ")
+
+            for img_real, label in progress_bar:
+                # YOUR CODE HERE - fill in the training step for generator & discriminator
+                img_real = img_real.to(device)
+                noise = t.randn(img_real.size(0), self.model.latent_dim_size).to(device)
+                img_fake = self.model.netG(noise)
+                disc_loss = self.training_step_discriminator(img_real, img_fake)
+                gen_loss = self.training_step_generator(img_fake)
+                self.step += 1
+                progress_bar.set_postfix(disc_loss=f"{disc_loss.item():.3f}", gen_loss=f"{gen_loss.item():.3f}", n_img_seen=f"{self.step*self.args.batch_size}")    
+            self.log_samples()
+            
+
+        if self.args.use_wandb:
+            wandb.finish()
+
+        return self.model
+
+
+# %%
+# Arguments for MNIST
+args = DCGANArgs(
+    dataset="MNIST",
+    hidden_channels=[12, 24],
+    epochs=20,
+    batch_size=128,
+    use_wandb=False,
+)
+trainer = DCGANTrainer(args)
+dcgan = trainer.train()
+
+# %%
+# Arguments for CelebA
+args = DCGANArgs(
+    dataset="CELEB",
+    hidden_channels=[128, 256, 512],
+    batch_size=32,  # if you get OOM errors, reduce this!
+    epochs=5,
+    use_wandb=False,
+)
+trainer = DCGANTrainer(args)
+dcgan = trainer.train()
 
 # %%
