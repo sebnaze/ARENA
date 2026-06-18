@@ -431,3 +431,354 @@ trainer = VAETrainer(args)
 vae = trainer.train()
 
 # %%
+class Tanh(nn.Module):
+    def forward(self, x: Tensor) -> Tensor:
+        return t.tanh(x)
+
+
+class LeakyReLU(nn.Module):
+    def __init__(self, negative_slope: float = 0.01):
+        super().__init__()
+        self.negative_slope = negative_slope
+
+    def forward(self, x: Tensor) -> Tensor:
+        return t.where(x >= 0, x, self.negative_slope * x)
+
+    def extra_repr(self) -> str:
+        return f"negative_slope={self.negative_slope}"
+
+
+class Sigmoid(nn.Module):
+    def forward(self, x: Tensor) -> Tensor:
+        return 1 / (1 + t.exp(-x))
+
+
+tests.test_Tanh(Tanh)
+tests.test_LeakyReLU(LeakyReLU)
+tests.test_Sigmoid(Sigmoid)
+
+# %% --------------------     GAN   -----------------------------
+
+class Generator(nn.Module):
+    def __init__(
+        self,
+        latent_dim_size: int = 100,
+        img_size: int = 64,
+        img_channels: int = 3,
+        hidden_channels: list[int] = [128, 256, 512],
+    ):
+        """
+        Implements the generator architecture from the DCGAN paper (the diagram at the top
+        of page 4). We assume the size of the activations doubles at each layer (so image
+        size has to be divisible by 2 ** len(hidden_channels)).
+
+        Args:
+            latent_dim_size:
+                the size of the latent dimension, i.e. the input to the generator
+            img_size:
+                the size of the image, i.e. the output of the generator
+            img_channels:
+                the number of channels in the image (3 for RGB, 1 for grayscale)
+            hidden_channels:
+                the number of channels in the hidden layers of the generator (starting closest
+                to the middle of the DCGAN and going outward, i.e. in chronological order for
+                the generator)
+        """
+        n_layers = len(hidden_channels)
+        assert img_size % (2**n_layers) == 0, "activation size must double at each layer"
+
+        super().__init__()
+
+        self.project_and_reshape = Sequential(
+            Linear(in_features=latent_dim_size, out_features=hidden_channels[-1]*(img_size//(2**n_layers))**2, bias=False),
+            Rearrange('b (c h w) -> b c h w', c=hidden_channels[-1], h=img_size//(2**n_layers), w=img_size//(2**n_layers)),
+            BatchNorm2d(num_features=hidden_channels[-1]),
+        )
+        self.hidden_layers = Sequential(
+            *[nn.Sequential(
+                ConvTranspose2d(
+                    in_channels=hidden_channels[-i-1],
+                    out_channels=hidden_channels[-i-2],
+                    kernel_size=4,
+                    stride=2,
+                    padding=1
+                ),
+                BatchNorm2d(num_features=hidden_channels[-i-2]),
+                ReLU()
+            ) for i in range(n_layers-1)],
+            ConvTranspose2d(
+                in_channels=hidden_channels[0],
+                out_channels=img_channels,
+                kernel_size=4,
+                stride=2,
+                padding=1
+            ),
+            Tanh()
+        )   
+
+    def forward(self, x: Tensor) -> Tensor:
+        x = self.project_and_reshape(x)
+        x = self.hidden_layers(x)
+        return x
+
+
+class Discriminator(nn.Module):
+    def __init__(
+        self,
+        img_size: int = 64,
+        img_channels: int = 3,
+        hidden_channels: list[int] = [128, 256, 512],
+    ):
+        """
+        Implements the discriminator architecture from the DCGAN paper (the mirror image of
+        the diagram at the top of page 4). We assume the size of the activations doubles at
+        each layer (so image size has to be divisible by 2 ** len(hidden_channels)).
+
+        Args:
+            img_size:
+                the size of the image, i.e. the input of the discriminator
+            img_channels:
+                the number of channels in the image (3 for RGB, 1 for grayscale)
+            hidden_channels:
+                the number of channels in the hidden layers of the discriminator (starting
+                closest to the middle of the DCGAN and going outward, i.e. in reverse-
+                chronological order for the discriminator)
+        """
+        n_layers = len(hidden_channels)
+        assert img_size % (2**n_layers) == 0, "activation size must double at each layer"
+
+        super().__init__()
+
+        self.hidden_layers = Sequential(
+            *[Sequential(
+                Conv2d(
+                    in_channels=img_channels,
+                    out_channels=hidden_channels[0],
+                    kernel_size=4,
+                    stride=2,
+                    padding=1
+                ),
+                LeakyReLU(negative_slope=0.2),
+            ),
+            *[nn.Sequential(
+                Conv2d(
+                    in_channels=hidden_channels[i],
+                    out_channels=hidden_channels[i+1],
+                    kernel_size=4,
+                    stride=2,
+                    padding=1
+                ),
+                BatchNorm2d(num_features=hidden_channels[i+1]),
+                LeakyReLU(negative_slope=0.2)
+            ) for i in range(n_layers-1)]
+            ]
+        )   
+        
+        self.classifier = Sequential(
+            nn.Flatten(start_dim=1, end_dim=-1),
+            Linear(in_features=hidden_channels[-1]*(img_size//(2**n_layers))**2, out_features=1, bias=False),
+            Sigmoid()
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        x = self.hidden_layers(x)
+        x = self.classifier(x)
+        return x.squeeze()  # remove dummy `out_channels` dimension
+
+
+class DCGAN(nn.Module):
+    netD: Discriminator
+    netG: Generator
+
+    def __init__(
+        self,
+        latent_dim_size: int = 100,
+        img_size: int = 64,
+        img_channels: int = 3,
+        hidden_channels: list[int] = [128, 256, 512],
+    ):
+        super().__init__()
+        self.latent_dim_size = latent_dim_size
+        self.img_size = img_size
+        self.img_channels = img_channels
+        self.hidden_channels = hidden_channels
+        self.netD = Discriminator(img_size, img_channels, hidden_channels)
+        self.netG = Generator(latent_dim_size, img_size, img_channels, hidden_channels)
+
+
+# %% Check that the number of parameters in your implementation matches the reference implementation
+from part2_cnns.utils import print_param_count
+from part5_vaes_and_gans import solutions
+
+print_param_count(Generator(), solutions.DCGAN().netG)
+print_param_count(Discriminator(), solutions.DCGAN().netD)
+
+# %% Check that the shapes of the activations in your implementation match the reference implementation
+model = DCGAN().to(device)
+x = t.randn(3, 100).to(device)
+print(torchinfo.summary(model.netG, input_data=x), end="\n\n")
+print(torchinfo.summary(model.netD, input_data=model.netG(x)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# %% Bonus : Transposed convolutions
+from part2_cnns.solutions import (
+    IntOrPair,
+    conv1d_minimal,
+    conv2d_minimal,
+    force_pair,
+    pad1d,
+    pad2d,
+)
+
+
+def conv_transpose1d_minimal(
+    x: Float[Tensor, "batch in_channels width"],
+    weights: Float[Tensor, "in_channels out_channels kernel_width"],
+) -> Float[Tensor, "batch out_channels output_width"]:
+    """Like torch's conv_transpose1d using bias=False and all other keyword arguments left at their default values."""
+    out_width = x.shape[-1] + weights.shape[-1] - 1
+    n_pad = weights.shape[-1] - 1
+    x_padded = pad1d(x, left=n_pad, right=n_pad, pad_value=0)
+    weights = einops.rearrange(weights, "in_channels out_channels kernel_width -> out_channels in_channels kernel_width")
+    return conv1d_minimal(x_padded, weights.flip(-1))
+
+
+tests.test_conv_transpose1d_minimal(conv_transpose1d_minimal)
+
+
+# %% fractional stride (a.k.a. "spaced out") convolutions
+def fractional_stride_1d(
+    x: Float[Tensor, "batch in_channels width"], stride: int = 1
+) -> Float[Tensor, "batch in_channels output_width"]:
+    """
+    Returns a version of x suitable for transposed convolutions, i.e. "spaced out" with zeros
+    between its values. This spacing only happens along the last dimension.
+
+    x: shape (batch, in_channels, width)
+
+    Example:
+        x = [[[1, 2, 3], [4, 5, 6]]]
+        stride = 2
+        output = [[[1, 0, 2, 0, 3], [4, 0, 5, 0, 6]]]
+    """
+    if stride == 1:
+        return x
+    batch, in_channels, width = x.shape
+    out_width = width + (width - 1) * (stride - 1)
+    output = t.zeros((batch, in_channels, out_width), dtype=x.dtype)
+    output[..., ::stride] = x
+    return output
+
+
+tests.test_fractional_stride_1d(fractional_stride_1d)
+
+# %% Putting it all together: transposed convolution using fractional stride and conv1d
+def conv_transpose1d(
+    x: Float[Tensor, "batch in_channels width"],
+    weights: Float[Tensor, "in_channels out_channels kernel_width"],
+    stride: int = 1,
+    padding: int = 0,
+) -> Float[Tensor, "batch out_channels output_width"]:
+    """
+    Like torch's conv_transpose1d using bias=False and all other keyword arguments left at their
+    default values.
+    """
+    x_strided = fractional_stride_1d(x, stride=stride)
+    x_padded = pad1d(x_strided, left=weights.shape[-1] - 1 - padding, right=weights.shape[-1] - 1 - padding, pad_value=0)
+    weights = einops.rearrange(weights, "in_channels out_channels kernel_width -> out_channels in_channels kernel_width")   
+    return conv1d_minimal(x_padded, weights.flip(-1))
+
+
+tests.test_conv_transpose1d(conv_transpose1d)
+
+# %% Now extend the fractional stride and transposed convolution to 2D, applying the same logic along both the height and width dimensions.
+def fractional_stride_2d(
+    x: Float[Tensor, "batch in_channels height width"], stride_h: int, stride_w: int
+) -> Float[Tensor, "batch in_channels output_height output_width"]:
+    """
+    Same as fractional_stride_1d, except we apply it along the last 2 dims of x (height and width).
+    """
+    if stride_h == stride_w == 1:
+        return x
+    batch, in_channels, height, width = x.shape
+    out_height = height + (height - 1) * (stride_h - 1)
+    out_width = width + (width - 1) * (stride_w - 1)
+    output = t.zeros((batch, in_channels, out_height, out_width), dtype=x.dtype)
+    output[..., ::stride_h, ::stride_w] = x
+    return output
+
+
+def conv_transpose2d(x, weights, stride: IntOrPair = 1, padding: IntOrPair = 0) -> Tensor:
+    """Like torch's conv_transpose2d using bias=False
+    x: shape (batch, in_channels, height, width)
+    weights: shape (out_channels, in_channels, kernel_height, kernel_width)
+    Returns: shape (batch, out_channels, output_height, output_width)
+    """
+    stride_h, stride_w = force_pair(stride)
+    padding_h, padding_w = force_pair(padding)
+
+    x_strided = fractional_stride_2d(x, stride_h=stride_h, stride_w=stride_w)
+    x_padded = pad2d(x_strided, left=weights.shape[-1] - 1 - padding_w, right=weights.shape[-1] - 1 - padding_w, 
+                     top=weights.shape[-2] - 1 - padding_h, bottom=weights.shape[-2] - 1 - padding_h,
+                     pad_value=0)
+    weights = einops.rearrange(weights, "i o h w -> o i h w")   
+    return conv2d_minimal(x_padded, weights.flip(-2).flip(-1))
+
+
+tests.test_fractional_stride_2d(fractional_stride_2d)
+tests.test_conv_transpose2d(conv_transpose2d)
+
+# %% 
+class ConvTranspose2d(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: IntOrPair,
+        stride: IntOrPair = 1,
+        padding: IntOrPair = 0,
+    ):
+        """
+        Same as torch.nn.ConvTranspose2d with bias=False.
+        Name your weight field `self.weight` for compatibility with the tests.
+        """
+        super().__init__()
+
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = force_pair(kernel_size)
+        self.stride = stride
+        self.padding = padding
+
+        sqrt_k = (1 / (out_channels * self.kernel_size[0] * self.kernel_size[1]))**0.5
+        self.weight = nn.Parameter(t.rand(in_channels, out_channels, *self.kernel_size) * 2 * sqrt_k - sqrt_k) 
+
+
+    def forward(
+        self, x: Float[Tensor, "batch in_channels height width"]
+    ) -> Float[Tensor, "batch out_channels output_height output_width"]:
+        return conv_transpose2d(x, self.weight, stride=self.stride, padding=self.padding)
+
+    def extra_repr(self) -> str:
+        keys = ["in_channels", "out_channels", "kernel_size", "stride", "padding"]
+        return ", ".join([f"{key}={getattr(self, key)}" for key in keys])
+
+
+tests.test_ConvTranspose2d(ConvTranspose2d)
+
+# %%

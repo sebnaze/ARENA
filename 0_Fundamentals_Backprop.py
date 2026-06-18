@@ -59,7 +59,6 @@ def unbroadcast(broadcasted: Arr, original: Arr) -> Arr:
     ogs, bcs = original.shape, broadcasted.shape
 
     for _ in range(broadcasted.ndim - original.ndim):
-        print(broadcasted.shape,  original.shape)
         broadcasted = broadcasted.sum(axis=0)
 
     ids = [dim for dim,val in enumerate(original.shape) if val==1]
@@ -662,21 +661,14 @@ permute = wrap_forward_fn(np.transpose)
 tests.test_permute_back(Tensor)
 
 # %%
-def sum_back(grad_out: Arr, out: Arr, x: Arr, dim: int | None = None, keepdim: bool = False) -> Arr:
+def sum_back(grad_out: Arr, out: Arr, x: Arr, dim=None, keepdim=False):
     """Backward function for torch.sum"""
     # Step 1: add dummy dims if not keep dims
-    if not keepdim:
-        exp_dims = []
-        for i,xs in enumerate(x.shape):
-            if xs not in grad_out.shape:
-                exp_dims.append(i)
-        grad_out = np.expand_dims(grad_out, tuple(exp_dims))
+    if (not keepdim) and (dim is not None):
+        grad_out = np.expand_dims(grad_out, dim)
 
     # Step 2: broadcast along dimensions that were summed over
     return np.broadcast_to(grad_out, x.shape)
-
-
-
 
 
 def _sum(x: Arr, dim=None, keepdim=False) -> Arr:
@@ -691,5 +683,513 @@ tests.test_sum_keepdim_false(Tensor)
 tests.test_sum_keepdim_true(Tensor)
 tests.test_sum_dim_none(Tensor)
 tests.test_sum_nonscalar_grad_out(Tensor)
+
+# %%
+add = wrap_forward_fn(np.add)
+subtract = wrap_forward_fn(np.subtract)
+true_divide = wrap_forward_fn(np.true_divide)
+
+BACK_FUNCS.add_back_func(np.add, 0, lambda grad_out, out, x, y: unbroadcast(grad_out, x))
+# YOUR CODE HERE - continue adding to BACK_FUNCS, for each of the 3 functions & both arg orders
+BACK_FUNCS.add_back_func(np.add, 1, lambda grad_out, out, x, y: unbroadcast(grad_out, y))
+BACK_FUNCS.add_back_func(np.subtract, 0, lambda grad_out, out, x, y: unbroadcast(grad_out, x))
+BACK_FUNCS.add_back_func(np.subtract, 1, lambda grad_out, out, x, y: unbroadcast(-grad_out, y))
+BACK_FUNCS.add_back_func(np.true_divide, 0, lambda grad_out, out, x, y: unbroadcast(grad_out / y, x))
+BACK_FUNCS.add_back_func(np.true_divide, 1, lambda grad_out, out, x, y: unbroadcast(-grad_out * x / (y**2), y))
+
+tests.test_add_broadcasted(Tensor)
+tests.test_subtract_broadcasted(Tensor)
+tests.test_truedivide_broadcasted(Tensor)
+
+# %% Indexing
+Index = int | tuple[int, ...] | tuple[Arr] | tuple[Tensor]
+
+
+def coerce_index(index: Index):
+    """Helper function: converts array of tensors to array of numpy arrays."""
+    if isinstance(index, tuple) and all(isinstance(i, Tensor) for i in index):
+        return tuple([i.array for i in index])
+    else:
+        return index
+
+
+def _getitem(x: Arr, index: Index) -> Arr:
+    """Like x[index] when x is a torch.Tensor."""
+    return x[coerce_index(index)]
+
+
+def getitem_back(grad_out: Arr, out: Arr, x: Arr, index: Index):
+    """
+    Backwards function for _getitem.
+
+    Hint: use np.add.at(a, indices, b)
+    This function works just like a[indices] += b, except that it allows for repeated indices.
+    """
+    new_grad_out = np.full_like(x, 0)
+    np.add.at(new_grad_out, coerce_index(index), grad_out)
+    return new_grad_out
+
+
+getitem = wrap_forward_fn(_getitem)
+BACK_FUNCS.add_back_func(_getitem, 0, getitem_back)
+
+# %% non-differentialble functions
+def _argmax(x: Arr, dim=None, keepdim=False):
+    """Like torch.argmax."""
+    result = np.argmax(x, axis=dim)
+    if keepdim:
+        return np.expand_dims(result, axis=([] if dim is None else dim))
+    return result
+
+
+argmax = wrap_forward_fn(_argmax, is_differentiable=False)
+
+a = Tensor([1.0, 0.0, 3.0, 4.0], requires_grad=True)
+b = a.argmax()
+assert not b.requires_grad
+assert b.recipe is None
+assert b.item() == 3
+
+# %% in-place operations
+def add_(x: Tensor, other: Tensor, alpha: float = 1.0) -> Tensor:
+    """Like torch.add_. Compute x += other * alpha in-place and return tensor."""
+    np.add(x.array, other.array * alpha, out=x.array)
+    return x
+
+
+def sub_(x: Tensor, other: Tensor, alpha: float = 1.0) -> Tensor:
+    """Like torch.sub_. Compute x -= other * alpha in-place and return tensor."""
+    np.subtract(x.array, other.array * alpha, out=x.array)
+    return x
+
+
+def safe_example():
+    """This example should work properly."""
+    a = Tensor([0.0, 1.0, 2.0, 3.0], requires_grad=True)
+    b = Tensor([2.0, 3.0, 4.0, 5.0], requires_grad=True)
+    a.add_(b)
+    c = a * b
+    c.sum().backward()
+    assert a.grad is not None and np.allclose(a.grad.array, [2.0, 3.0, 4.0, 5.0])
+    assert b.grad is not None and np.allclose(b.grad.array, [2.0, 4.0, 6.0, 8.0])
+
+
+def unsafe_example():
+    """
+    This example is expected to compute the wrong gradients, because dc/db is calculated using the
+    modified a.
+    """
+    a = Tensor([0.0, 1.0, 2.0, 3.0], requires_grad=True)
+    b = Tensor([2.0, 3.0, 4.0, 5.0], requires_grad=True)
+    c = a * b
+    a.add_(b)
+    c.sum().backward()
+    if a.grad is not None and np.allclose(a.grad.array, [2.0, 3.0, 4.0, 5.0]):
+        print("Grad wrt a is OK!")
+    else:
+        print("Grad wrt a is WRONG!")
+    if b.grad is not None and np.allclose(b.grad.array, [0.0, 1.0, 2.0, 3.0]):
+        print("Grad wrt b is OK!")
+    else:
+        print("Grad wrt b is WRONG!")
+
+
+safe_example()
+unsafe_example()
+
+
+# %% Max
+def maximum_back0(grad_out: Arr, out: Arr, x: Arr, y: Arr):
+    """Backwards function for max(x, y) wrt x."""
+    # element-wise max
+    bool_sum = np.where(x>=y, 1, 0)
+    bool_sum = np.where(x==y, 0.5*bool_sum, bool_sum)
+    grad_out = unbroadcast(grad_out * bool_sum, x)
+    return grad_out
+
+
+
+def maximum_back1(grad_out: Arr, out: Arr, x: Arr, y: Arr):
+    """Backwards function for max(x, y) wrt y."""
+    bool_sum = np.where(y>=x, 1, 0)
+    bool_sum = np.where(x==y, 0.5*bool_sum, bool_sum)
+    grad_out = unbroadcast(grad_out * bool_sum, y)
+    return grad_out
+
+
+maximum = wrap_forward_fn(np.maximum)
+BACK_FUNCS.add_back_func(np.maximum, 0, maximum_back0)
+BACK_FUNCS.add_back_func(np.maximum, 1, maximum_back1)
+
+tests.test_maximum(Tensor)
+tests.test_maximum_broadcasted(Tensor)
+
+# %% ReLU
+def relu(x: Tensor) -> Tensor:
+    """Like torch.nn.function.relu(x, inplace=False)."""
+    return maximum(x, 0)
+
+tests.test_relu(Tensor)
+
+
+# %% MATMUL
+def _matmul2d(x: Arr, y: Arr) -> Arr:
+    """Matrix multiply restricted to the case where both inputs are exactly 2D."""
+    return x @ y
+
+
+def matmul2d_back0(grad_out: Arr, out: Arr, x: Arr, y: Arr) -> Arr:
+    return grad_out @ y.T
+
+
+def matmul2d_back1(grad_out: Arr, out: Arr, x: Arr, y: Arr) -> Arr:
+    return x.T @ grad_out
+
+
+matmul = wrap_forward_fn(_matmul2d)
+BACK_FUNCS.add_back_func(_matmul2d, 0, matmul2d_back0)
+BACK_FUNCS.add_back_func(_matmul2d, 1, matmul2d_back1)
+
+tests.test_matmul2d(Tensor)
+
+
+# %% Parameter
+class Parameter(Tensor):
+    def __init__(self, tensor: Tensor, requires_grad=True):
+        """Share the array with the provided tensor."""
+        return super().__init__(tensor.array, requires_grad=requires_grad)
+
+    def __repr__(self):
+        return f"Parameter containing:\n{super().__repr__()}"
+
+
+x = Tensor([1.0, 2.0, 3.0])
+p = Parameter(x)
+assert p.requires_grad
+assert p.array is x.array
+assert repr(p) == "Parameter containing:\nTensor(array([1., 2., 3.], dtype=float32), requires_grad=True)"
+x.add_(Tensor(np.array(2.0)))
+assert np.allclose(p.array, np.array([3.0, 4.0, 5.0])), (
+    "in-place modifications to the original tensor should affect the parameter"
+)
+
+# %% Module
+class Module:
+    _modules: dict[str, "Module"]
+    _parameters: dict[str, Parameter]
+
+    def __init__(self):
+        self._modules: dict[str, "Module"] = {}
+        self._parameters: dict[str, Parameter] = {}
+
+    def modules(self) -> Iterator["Module"]:
+        """Return the direct child modules of this module, not including self."""
+        yield from self._modules.values()
+
+    def parameters(self, recurse: bool = True) -> Iterator[Parameter]:
+        """
+        Return an iterator over Module parameters.
+
+        recurse: if True, the iterator includes parameters of submodules, recursively.
+        """
+        yield from self._parameters.values()
+        if recurse:
+            for mod in self.modules():
+                yield from mod.parameters(recurse=True)
+
+    def __setattr__(self, key: str, val: Any) -> None:
+        """
+        If val is a Parameter or Module, store it in the appropriate _parameters or _modules dict.
+        Otherwise, call __setattr__ from the superclass.
+        """
+        if isinstance(val, Parameter):
+            self._parameters[key] = val
+        elif isinstance(val, Module):
+            self._modules[key] = val
+        super().__setattr__(key, val)
+
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
+
+    def forward(self):
+        raise NotImplementedError("Subclasses must implement forward!")
+
+    def __repr__(self):
+        _indent = lambda s_, nSpaces: re.sub("\n", "\n" + (" " * nSpaces), s_)
+        lines = [f"({key}): {_indent(repr(module), 2)}" for key, module in self._modules.items()]
+        return "".join(
+            [
+                self.__class__.__name__ + "(",
+                "\n  " + "\n  ".join(lines) + "\n" if lines else "",
+                ")",
+            ]
+        )
+
+
+class TestInnerModule(Module):
+    def __init__(self):
+        super().__init__()
+        self.param1 = Parameter(Tensor([1.0]))
+        self.param2 = Parameter(Tensor([2.0]))
+
+
+class TestModule(Module):
+    def __init__(self):
+        super().__init__()
+        self.inner = TestInnerModule()
+        self.param3 = Parameter(Tensor([3.0]))
+
+
+mod = TestModule()
+assert list(mod.modules()) == [mod.inner]
+assert list(mod.parameters()) == [mod.param3, mod.inner.param1, mod.inner.param2]
+print("Manually verify that the repr looks reasonable:")
+print(mod)
+print("All tests for `Module` passed!")
+
+# %% Linear
+class Linear(Module):
+    weight: Parameter
+    bias: Parameter | None
+
+    def __init__(self, in_features: int, out_features: int, bias=True):
+        """
+        A simple linear (technically, affine) transformation.
+
+        The fields should be named `weight` and `bias` for compatibility with PyTorch.
+        If `bias` is False, set `self.bias` to None.
+        """
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+
+        sf = 1/np.sqrt(in_features)
+        self.weight = Parameter(Tensor(np.random.uniform(-sf, sf, size=(out_features, in_features))))
+        if bias:
+            self.bias = Parameter(Tensor(np.random.uniform(-sf, sf, size=(out_features,))))
+        else:   
+            self.bias = None
+
+    def forward(self, x: Tensor) -> Tensor:
+        """
+        x: shape (*, in_features)
+        Return: shape (*, out_features)
+        """
+        out = x @ self.weight.T
+        if self.bias is not None:
+            out = out + self.bias
+        return out
+
+    def extra_repr(self) -> str:
+        return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}"
+
+
+linear = Linear(3, 4)
+assert isinstance(linear.weight, Tensor)
+assert linear.weight.requires_grad
+
+input = Tensor([[1.0, 2.0, 3.0]])
+output = linear(input)
+assert output.requires_grad
+
+expected_output = input @ linear.weight.T + linear.bias
+np.testing.assert_allclose(output.array, expected_output.array)
+
+print("All tests for `Linear` passed!")
+
+
+# %%
+class ReLU(Module):
+    def forward(self, x: Tensor) -> Tensor:
+        return relu(x)
+
+# %%
+class MLP(Module):
+    def __init__(self):
+        super().__init__()
+        self.linear1 = Linear(28 * 28, 64)
+        self.linear2 = Linear(64, 64)
+        self.relu1 = ReLU()
+        self.relu2 = ReLU()
+        self.output = Linear(64, 10)
+
+    def forward(self, x: Tensor) -> Tensor:
+        x = x.reshape((x.shape[0], 28 * 28))
+        x = self.relu1(self.linear1(x))
+        x = self.relu2(self.linear2(x))
+        x = self.output(x)
+        return x
+
+# %%
+def cross_entropy(logits: Tensor, true_labels: Tensor) -> Tensor:
+    """Like torch.nn.functional.cross_entropy with reduction='none'.
+
+    logits: shape (batch, classes)
+    true_labels: shape (batch,). Each element is the index of the correct label in the logits.
+
+    Return: shape (batch, ) containing the per-example loss.
+    """
+        
+    # Step 1: Softmax logits to get probs (ignore numerical stability for now)
+    #y_pred = t.nn.functional.softmax(logits, dim=-1)
+    max_logits = Tensor(logits.array.max(axis=-1, keepdims=True))
+    exp_logits = exp(logits - max_logits)
+    y_pred = exp_logits / sum(exp_logits, dim=-1, keepdim=True)
+
+    # Step 2: Construct y_true
+    y_true = np.zeros_like(logits, dtype=np.float32)
+    for i,l in enumerate(true_labels):
+        y_true[i,l.item()] = 1.
+
+    # Step 3: Compute cross entropy  sum -y_true * log(y_pred)
+    loss = Tensor(-(y_true*np.log(y_pred.array)))
+    loss = sum(loss, dim=-1)
+    return loss
+    
+
+    # Shortcut explained : cross entropy loss L = - sum_C y_true*log(y_pred).
+    # Since y_true has shape (batch, classes), and the second dimension is all zeros but 1 at index k of the true class,
+    # The sum over clasess sum_C disapear and L becomes -log(y_pred[k]), i.e. the negative log probability of the true class.
+
+    #loss =  -log(y_pred)[arange(0, logits.shape[0]), true_labels]
+    #return loss
+
+tests.test_cross_entropy(Tensor, cross_entropy)
+
+# %% Cross entropy solution with log probs
+def cross_entropy(logits: Tensor, true_labels: Tensor) -> Tensor:
+    """Like torch.nn.functional.cross_entropy with reduction='none'.
+
+    logits: shape (batch, classes)
+    true_labels: shape (batch,). Each element is the index of the correct label in the logits.
+
+    Return: shape (batch, ) containing the per-example loss.
+    """
+    batch_size = logits.shape[0]
+    logprobs = logits - logits.exp().sum(-1, keepdim=True).log()
+    return -logprobs[arange(0, batch_size), true_labels]
+
+tests.test_cross_entropy(Tensor, cross_entropy)
+# %%
+class NoGrad:
+    """Context manager that disables grad inside the block. Like torch.no_grad."""
+
+    was_enabled: bool
+
+    def __enter__(self):
+        """
+        Method which is called whenever the context manager is entered, i.e. at the start of the
+        `with NoGrad():` block. This disables gradient tracking (but stores the value it had before,
+        so we can set it back to this on exit).
+        """
+        global grad_tracking_enabled
+        self.was_enabled = grad_tracking_enabled
+        grad_tracking_enabled = False
+
+    def __exit__(self, type, value, traceback):
+        """
+        Method which is called whenever we exit the context manager. This sets the global
+        `grad_tracking_enabled` variable back to the value it had before we entered the context
+        manager.
+        """
+        global grad_tracking_enabled
+        grad_tracking_enabled = self.was_enabled
+
+
+assert grad_tracking_enabled
+with NoGrad():
+    assert not grad_tracking_enabled
+assert grad_tracking_enabled
+print("Verified that we've disabled gradients inside `NoGrad`, then set back to its previous value once we exit.")
+
+# %% SGD
+class SGD:
+    def __init__(self, params: Iterable[Parameter], lr: float):
+        """Vanilla SGD with no additional features."""
+        self.params = list(params)
+        self.lr = lr
+        self.b = [None for _ in self.params]
+
+    def zero_grad(self) -> None:
+        """Iterates through params, and sets all grads to None."""
+        for p in self.params:
+            p.grad = None
+
+    def step(self) -> None:
+        """Iterates through params, and updates each of them by subtracting `param.grad * lr`."""
+        """Performs a single optimization step of the SGD algorithm."""
+        with NoGrad():
+            for param in self.params:
+                if param.grad is None:
+                    continue  # No gradient for this parameter, skip it
+
+                # Update the parameter
+                param -= self.lr * param.grad
+
+
+# %%
+train_loader, test_loader = get_mnist()
+visualize(train_loader)
+
+# %%
+def train(
+    model: MLP,
+    train_loader: DataLoader,
+    optimizer: SGD,
+    epoch: int,
+    train_loss_list: list | None = None,
+):
+    print(f"Epoch: {epoch}")
+    progress_bar = tqdm(train_loader)
+    for data, target in progress_bar:
+        data, target = Tensor(data.numpy()), Tensor(target.numpy())
+        optimizer.zero_grad()
+        output = model(data)
+        loss = cross_entropy(output, target).sum() / len(output)
+        loss.backward()
+        progress_bar.set_description(f"Train set: Avg loss: {loss.item():.3f}")
+        optimizer.step()
+        if train_loss_list is not None:
+            train_loss_list.append(loss.item())
+
+
+def test(model: MLP, test_loader: DataLoader, test_accuracy_list: list | None = None):
+    test_loss = 0
+    test_accuracy = 0
+    with NoGrad():
+        for data, target in test_loader:
+            data, target = Tensor(data.numpy()), Tensor(target.numpy())
+            output: Tensor = model(data)
+            test_loss += cross_entropy(output, target).sum().item()
+            pred = output.argmax(dim=1, keepdim=True)
+            test_accuracy += (pred == target.reshape(pred.shape)).sum().item()
+    n_data = len(test_loader.dataset)
+    test_loss /= n_data
+    print(f"Test set:  Avg loss: {test_loss:.3f}, Accuracy: {test_accuracy}/{n_data} ({test_accuracy / n_data:.1%})")
+    if test_accuracy_list is not None:
+        test_accuracy_list.append(test_accuracy / n_data)
+
+
+num_epochs = 5
+model = MLP()
+start = time.time()
+train_loss_list = []
+test_accuracy_list = []
+optimizer = SGD(model.parameters(), lr=0.01)
+for epoch in range(num_epochs):
+    train(model, train_loader, optimizer, epoch, train_loss_list)
+    test(model, test_loader, test_accuracy_list)
+
+print(f"\nCompleted in {time.time() - start: .2f}s")
+
+line(
+    [train_loss_list, test_accuracy_list],
+    x_max=num_epochs,
+    yaxis2_range=[0, 1],
+    use_secondary_yaxis=True,
+    labels={"x": "Batches seen", "y1": "Cross entropy loss", "y2": "Test accuracy"},
+    title="MLP training on MNIST from scratch!",
+    width=600,
+)
 
 # %%
