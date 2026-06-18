@@ -1,6 +1,6 @@
-# ARENA
+# _ARENA_
 
-## Fundamentals
+# Chapter 0: Fundamentals
 
 ### Neural Networks
 - What makes neural networks more powerful than basic statistical methods like linear regression?
@@ -203,4 +203,80 @@ i.e. if the encoder minimizes $\sigma \rightarrow 0$ , the term $-\ln(\sigma^2)$
 
 Also the term $\mu^2$ forces the encoded center of all the classes to be around 0 (i.e. overlappign). The decoder has to figure out a way to transition smoothly from one class to another, creating a truly continuous space.   
  
-The $\epsilon$ parameter is random and is necessary for backprop (how? why?). Because differentiating $\mathcal{N}(\mu,\sigma)$ is not possible (non-continuous), but differentiating $\mu + \sigma \odot \epsilon$ works ($\frac{dz}{d\mu}=1$ and $\frac{dz}{d\sigma} = \epsilon$). 
+The $\epsilon$ parameter is random and is necessary for backprop (how? why?). Because differentiating $\mathcal{N}(\mu,\sigma)$ is not possible (non-continuous), but differentiating $\mu + \sigma \odot \epsilon$ works ($\frac{dz}{d\mu}=1$ and $\frac{dz}{d\sigma} = \epsilon$).
+
+The total loss reads 
+$$ \text{Loss}_{VAE} (x, x') = ||{x - x'}||^2 + D_{\text{KL}} \big( \mathcal{N}(\mu, \sigma^2) || \mathcal{N}(0, 1) \big)   $$
+
+#### Deeper into math:
+The discriminator (decoder) can be written 
+$$ p(x) = \int_z p(x|z)\;p(z)\;dz = \mathbb{E}_{z \sim p(z)} \big[ \; p(x|z) \;\big]$$
+but finding $p(x)$ by sampling over the latent space $z$ is computationally intractable. 
+
+That's where the generator (encoder) $q(z|x)$ helps: it concentrates the latent space to a region that is likely to produce $x$. So the above equation can be rewritten
+$$ p(x) = \int_z q(z|x) \; \frac{p(x|z)\;p(z)}{q(z|x)}dz = \mathbb{E}_{z \sim q(z|x)} \Big[ \; \frac{p(x|z)\;p(z)}{q(z|x)} \; \Big]$$
+
+Now, Jensen's inequality states that $\mathbb{E}\big[f(X)\big] \geq f\big(\mathbb{E}(X)\big)$ for any convex function $f$ (convex mean has the same curvature direction at all point i.e. $f''(x)>0$, e.g. $\log(x)$ is convex). 
+So $\log p(X) \geq p(\log X)$. 
+
+$p(x)$ becomes 
+$$ \log p(x) \geq \mathbb{E}_{z \sim q(z|x)} \Big[ \log \frac{p(x|z)\;p(z)}{q(z|x)}  \Big]$$
+
+which is called the *evidence lower-bound* (***ELBO***), because $\log p(x)$ is called the *evidence*.
+
+Now, rearranging the terms, we get
+$$\begin{aligned} 
+\mathbb{E}_{z \sim q(z|x)} \Big[ \log \frac{p(x|z)\;p(z)}{q(z|x)}  \Big] 
+= \mathbb{E}_{z \sim q(z|x)} \Big[ \log p(x|z) + \log \frac{\;p(z)}{q(z|x)} \; \Big] 
+&= \mathbb{E}_{z \sim q(z|x)} \Big[ \log p(x|z) - \log \frac{q(z|x)}{p(z)} \; \Big]\\ 
+&= \mathbb{E}_{z \sim q(z|x)} \Big[ \log p(x|z) \Big] - \mathbb{E}_{z \sim q(z|x)} \Big[\log \frac{q(z|x)}{p(z)} \; \Big] \end{aligned}$$
+
+Recall from above that $D_{\text{KL}} (P||Q) = \sum_x P(x) \log \frac{P(x)}{Q(x)} = p \log p - p \log q$, and can also be written $\mathbb{E}_p [ \log \frac{p}{q} ]$, therefore by flipping $p$ and $q$ we obtain: 
+$$ \text{ELBO}(x) = \mathbb{E}_{z \sim q(z|x)} \Big[ \log p(x|z) \Big] - D_{\text{KL}} \big(\; q(z|x)\;||\;p(z) \;\big)$$
+
+where $\mathbb{E}_{z \sim q(z|x)} \Big[ \log p(x|z) \Big]$ is the reconstrcution loss, and $D_{\text{KL}} \big( q(z|x)\;||\;p(z)\big)$ is the regularization term.
+
+### GAN
+
+![GAN](./imgs/dcgan-9-solid.png)
+
+#### Minimax game
+$$ \min_G \max_D V (D,G) = \mathbb{E}_x \big[ \log \big( D(x) \big) \big] + \mathbb{E}_z \big[ \log \big( 1 - D(G(z)) \big) \big]  $$
+
+
+### Bonus: Transposed convolutions
+![Transposed convolution](./imgs/convtranspose-1.png)
+
+For 1D transposed convolution (no padding, no strides):
+$$\begin{aligned}
+\text{output size} 
+&= \text{input size} \; -  \; \text{kernel size} + 2\times(\text{kernel size} - 1) + 1 \\
+&= \text{input size} \;  + \text{kernel size} - 1
+\end{aligned}$$
+
+With padding and strides:
+$$ \begin{aligned} 
+&\text{output size} \\
+&= \text{input size} \;  + \text{kernel size} - 1 - 2 \times \text{padding} + (\text{input size} -1) \times (\text{strides} -1 ) \\
+&= (\text{input size}-1) \; \times \text{strides} + \text{kernel size} - 2\times\text{padding}
+\end{aligned} $$
+
+
+# Chapter 1: Mechanistic Interpretability
+
+# Chapter 2: Reinforcement Learning
+
+# Chapter 3: Evals
+
+## Intro to Evals
+
+**Capacity**  *vs* **alignment evaluations**:  whether a model has the capacity *vs* the tendency for specific behaviors.
+
+**Greedy Coordinate Gradient (GCG)**: introduces an adversarial suffix to the user prompt, and optimize this suffix such that the generated response starts positively (e.g. "Sure, I can help with that."). When the adversarial suffix is optimized across many harmful prompts, this suffix acts as a universal jammer that inhibits the safety guardrails.  
+
+**Specification gaming** is a behaviour that satisfies the literal specification of an objective without achieving the intended outcome (e.g. flip the red cube upside down instead of putting it on top of the blue one). 
+
+### Representation Engineering
+
+**Abliteration** : Process of inhibiting the safety layers activation, by injecting a compliant vector directly onto the mode's middle layers. 
+**Forced refusal** : instead of inhibiting, the safety vector is potentiated. 
