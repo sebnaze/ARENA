@@ -30,7 +30,7 @@ from tqdm import tqdm
 chapter = "chapter0_fundamentals"
 section = "part3_optimization"
 #root_dir = next(p for p in Path.cwd().parents if (p / chapter).exists())
-root_dir = Path("/Users/sebastin/Documents/perso/ARENA_training/ARENA_3.0")
+root_dir = Path("/home/sebastin/Documents/ARENA/ARENA_3.0")
 exercises_dir = root_dir / chapter / "exercises"
 section_dir = exercises_dir / section
 if str(exercises_dir) not in sys.path:
@@ -192,7 +192,7 @@ def run_simple_model(rank, world_size):
     loss.backward()  # Each rank has separate gradients at this point
 
     print(f"Rank {rank}, before all_reduce, grads: {model.param.grad=}")
-    all_reduce(model.param.grad, rank, world_size)  # Synchronize gradients
+    all_reduce(model.parameters().grad, rank, world_size)  # Synchronize gradients
     print(f"Rank {rank}, after all_reduce, synced grads (summed over processes): {model.param.grad=}")
 
     optimizer.step()  # Step with the optimizer (this will update all models the same way)
